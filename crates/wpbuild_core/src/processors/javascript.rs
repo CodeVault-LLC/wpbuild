@@ -1,11 +1,12 @@
 use swc_common::{FileName, Globals, SourceMap, sync::Lrc};
-use swc_ecma_codegen::{self, Emitter, text_writer::JsWriter, Config};
-use swc_ecma_parser::{lexer::Lexer, EsSyntax, Parser as SwcParser, StringInput, Syntax};
 use swc_ecma_ast::EsVersion;
+use swc_ecma_codegen::{self, Config, Emitter, text_writer::JsWriter};
+use swc_ecma_parser::{EsSyntax, Parser as SwcParser, StringInput, Syntax, lexer::Lexer};
 
 pub fn transpile_js(code: &str, filename: String) -> String {
     let cm: Lrc<SourceMap> = SourceMap::default().into();
-    let fm: Lrc<swc_common::SourceFile> = cm.new_source_file(FileName::Custom(filename).into(), code.into());
+    let fm: Lrc<swc_common::SourceFile> =
+        cm.new_source_file(FileName::Custom(filename).into(), code.into());
 
     let syntax: Syntax = Syntax::Es(EsSyntax {
         jsx: true,
@@ -31,12 +32,7 @@ pub fn transpile_js(code: &str, filename: String) -> String {
                 cfg: emitter_config,
                 cm: cm.clone(),
                 comments: None,
-                wr: Box::new(JsWriter::new(
-                    cm.clone(),
-                    "\n",
-                    &mut buf,
-                    None,
-                )),
+                wr: Box::new(JsWriter::new(cm.clone(), "\n", &mut buf, None)),
             };
 
             emitter.emit_module(&module).unwrap();

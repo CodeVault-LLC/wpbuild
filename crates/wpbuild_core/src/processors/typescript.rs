@@ -1,7 +1,7 @@
 use swc_common::{FileName, Globals, SourceMap, sync::Lrc};
-use swc_ecma_codegen::{self, Emitter, text_writer::JsWriter, Config};
-use swc_ecma_parser::{lexer::Lexer, Parser as SwcParser, StringInput, Syntax, TsSyntax};
 use swc_ecma_ast::EsVersion;
+use swc_ecma_codegen::{self, Config, Emitter, text_writer::JsWriter};
+use swc_ecma_parser::{Parser as SwcParser, StringInput, Syntax, TsSyntax, lexer::Lexer};
 use swc_ecma_transforms_typescript::strip_type;
 use swc_ecma_visit::VisitMutWith;
 
@@ -24,7 +24,7 @@ pub fn transpile_ts(code: &str, filename: String) -> String {
     let globals = Globals::default();
     swc_common::GLOBALS.set(&globals, || {
         let mut module = module.clone();
-        
+
         // Strip TypeScript types with proper configuration
         module.visit_mut_with(&mut strip_type());
 
@@ -33,17 +33,12 @@ pub fn transpile_ts(code: &str, filename: String) -> String {
             let mut emitter_config = Config::default();
             emitter_config.minify = true; // Enable minification
             emitter_config.target = es_version;
-            
+
             let mut emitter = Emitter {
                 cfg: emitter_config,
                 cm: cm.clone(),
                 comments: None,
-                wr: Box::new(JsWriter::new(
-                    cm.clone(),
-                    "\n",
-                    &mut buf,
-                    None,
-                )),
+                wr: Box::new(JsWriter::new(cm.clone(), "\n", &mut buf, None)),
             };
 
             emitter.emit_module(&module).unwrap();
