@@ -1,6 +1,6 @@
 mod builder;
 mod manifest;
-mod js_processor;
+mod processors;
 
 use clap::Parser;
 use manifest::Manifest;
@@ -16,9 +16,9 @@ struct Args {
 }
 
 fn main() {
-    let args = Args::parse();
+    let args: Args = Args::parse();
 
-    let mut manifest = Manifest::new();
+    let mut manifest: Manifest = Manifest::new();
 
     builder::build_project(&args.input, &args.output, &mut manifest);
 
