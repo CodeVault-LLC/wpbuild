@@ -1,205 +1,128 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, path::Path};
 
-use anyhow::{anyhow, Error, Result};
-use swc_bundler::{Bundle, Bundler, Load, ModuleData, ModuleRecord};
-use swc_common::{errors::Handler, sync::Lrc, FileName, FilePathMapping, Mark, SourceMap, Span, GLOBALS};
-use swc_ecma_ast::*;
-use swc_ecma_codegen::{text_writer::{omit_trailing_semi, JsWriter, WriteJs}, Emitter};
-use swc_ecma_loader::{resolvers::{lru::CachingResolver, node::NodeModulesResolver}, TargetEnv};
-use swc_ecma_minifier::option::{CompressOptions, ExtraOptions, MangleOptions, MinifyOptions, TopLevelOptions};
+use anyhow::{Error, Result};
+use swc_bundler::{Bundler, Config, Hook, Load, ModuleData, ModuleRecord, ModuleType, Resolve};
+use swc_common::{sync::Lrc, FileName, FilePathMapping, Globals, SourceMap, Span};
+use swc_ecma_ast::{KeyValueProp, PropName};
+use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
+use swc_ecma_loader::resolve::Resolution;
 use swc_ecma_parser::{parse_file_as_module, Syntax};
-use swc_ecma_transforms::fixer;
-use swc_ecma_visit::VisitMutWith;
 
-fn print_bundles(cm: Lrc<SourceMap>, modules: Vec<Bundle>) {
-    for bundled in modules {
-        let code = {
-            let mut buf = Vec::new();
-
-            {
-                let wr = JsWriter::new(cm.clone(), "\n", &mut buf, None);
-                let mut emitter = Emitter {
-                    cfg: swc_ecma_codegen::Config::default().with_minify(true),
-                    cm: cm.clone(),
-                    comments: None,
-                    wr: Box::new(omit_trailing_semi(wr)) as Box<dyn WriteJs>
-                };
-
-                emitter.emit_module(&bundled.module).unwrap();
-            }
-
-            String::from_utf8_lossy(&buf).to_string()
-        };
-
-        #[cfg(feature = "concurrent")]
-        rayon::spawn(move || drop(bundled));
-
-        println!("Created output.js ({}kb)", code.len() / 1024);
-        fs::write("output.js", &code).unwrap();
-    }
-}
-
-/// Bundle a JavaScript/TypeScript entry file with specified module format
 pub fn bundle_entry(entry_file: &str) -> Result<String> {
     let path = Path::new(entry_file);
 
     let mut entries: HashMap<String, FileName> = HashMap::new();
     entries.insert(path.to_string_lossy().to_string(), FileName::Real(path.into()));
 
-    let globals = Box::leak(Box::default());
-
+    let globals: Globals = Globals::new();
     let cm: Lrc<SourceMap> = Lrc::new(SourceMap::new(FilePathMapping::empty()));
+    let external_modules = Vec::new();
+
     let mut bundler = Bundler::new(
-        globals,
+        &globals,
         cm.clone(),
-        Loader { cm: cm.clone() },
-        CachingResolver::new(
-            4096,
-            NodeModulesResolver::new(TargetEnv::Node, Default::default(), true),
-        ),
-        swc_bundler::Config {
-            require: false,
-            disable_inliner: false,
-            external_modules: Default::default(),
-            disable_fixer: true,
-            disable_hygiene: true,
-            disable_dce: false,
-            module: Default::default(),
+        PathLoader { cm: cm.clone() },
+        PathResolver,
+        Config {
+            require: true,
+            module: ModuleType::Es,
+            external_modules,
+            ..Default::default()
         },
-        Box::new(Hook),
+        Box::new(Noop),
     );
 
-    let mut modules: Vec<swc_bundler::Bundle> = bundler
-            .bundle(entries)
-            .map_err(|err| anyhow!("Bundling error: {:?}", err))?;
-    println!("Bundled as {} modules", modules.len());
+    let mut bundles = bundler.bundle(entries).expect("failed to bundle");
+    let bundle = bundles.pop().unwrap();
 
-    #[cfg(feature = "concurrent")]
-    rayon::spawn(move || {
-        drop(bundler);
-    });
+    let mut buf = Vec::new(); // Capture into a memory buffer
+    let mut emitter = Emitter {
+        cfg: swc_ecma_codegen::Config::default(),
+        cm: cm.clone(),
+        comments: None,
+        wr: Box::new(JsWriter::new(cm, "\n", &mut buf, None)),
+    };
 
-    modules = modules
-    .into_iter()
-    .map(|mut b| {
-        GLOBALS.set(&globals, || {
-            b.module = swc_ecma_minifier::optimize(
-                b.module.into(),
-                cm.clone(),
-                None,
-                None,
-                &MinifyOptions {
-                    compress: Some(CompressOptions {
-                        top_level: Some(TopLevelOptions { functions: true }),
-                        ..Default::default()
-                    }),
-                    mangle: Some(MangleOptions {
-                        top_level: Some(true),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                &ExtraOptions {
-                    unresolved_mark: Mark::new(),
-                    top_level_mark: Mark::new(),
-                    mangle_name_cache: None,
-                },
-            )
-            .expect_module();
-            b.module.visit_mut_with(&mut fixer(None));
-            b
-        })
-    })
-    .collect();
+    emitter.emit_module(&bundle.module).expect("failed to emit module");
 
-    let cm = cm;
-    print_bundles(cm, modules);
-
-    Ok("output.js".to_string())
-}
-
-struct Hook;
-
-impl swc_bundler::Hook for Hook {
-    fn get_import_meta_props(
-        &self,
-        span: Span,
-        module_record: &ModuleRecord,
-    ) -> Result<Vec<KeyValueProp>, Error> {
-        let file_name = module_record.file_name.to_string();
-
-        println!("get_import_meta_props: {:?}", file_name);
-        if file_name.is_empty() {
-            return Ok(vec![]);
-        }
-
-        Ok(vec![
-            KeyValueProp {
-                key: PropName::Ident(IdentName::new("url".into(), span)),
-                value: Box::new(Expr::Lit(Lit::Str(Str {
-                    span,
-                    raw: None,
-                    value: file_name.into(),
-                }))),
-            },
-            KeyValueProp {
-                key: PropName::Ident(IdentName::new("main".into(), span)),
-                value: Box::new(if module_record.is_entry {
-                    Expr::Member(MemberExpr {
-                        span,
-                        obj: Box::new(Expr::MetaProp(MetaPropExpr {
-                            span,
-                            kind: MetaPropKind::ImportMeta,
-                        })),
-                        prop: MemberProp::Ident(IdentName::new("main".into(), span)),
-                    })
-                } else {
-                    Expr::Lit(Lit::Bool(Bool { span, value: false }))
-                }),
-            },
-        ])
-    }
+    let result = String::from_utf8(buf).expect("emitted code is not valid UTF-8");
+    Ok(result)
 }
 
 
-pub struct Loader {
-    pub cm: Lrc<SourceMap>,
+
+struct PathLoader {
+    cm: Lrc<SourceMap>,
 }
 
-impl Load for Loader {
-    fn load(&self, f: &FileName) -> Result<ModuleData, Error> {
-        let fm = match f {
-            FileName::Real(path) => self.cm.load_file(path)?,
+impl Load for PathLoader {
+    fn load(&self, file: &FileName) -> Result<ModuleData, Error> {
+        let file = match file {
+            FileName::Real(v) => v,
             _ => unreachable!(),
         };
+
+        println!("Loading file: {}", file.display());
+
+        let fm = self.cm.load_file(file)?;
 
         let module = parse_file_as_module(
             &fm,
             Syntax::Es(Default::default()),
-            EsVersion::Es2020,
+            Default::default(),
             None,
             &mut Vec::new(),
         )
-        .unwrap_or_else(|err| {
-            let handler =
-                Handler::with_emitter(
-                    true,
-                    false,
-                    Box::new(swc_common::errors::emitter::EmitterWriter::new(
-                        Box::new(std::io::stderr()),
-                        Some(self.cm.clone()),
-                        false,
-                        false,
-                    )),
-                );
-            err.into_diagnostic(&handler).emit();
-            panic!("failed to parse")
-        });
+        .expect("This should not happen");
 
         Ok(ModuleData {
             fm,
             module,
             helpers: Default::default(),
         })
+    }
+}
+struct PathResolver;
+
+impl Resolve for PathResolver {
+    fn resolve(&self, base: &FileName, module_specifier: &str) -> Result<Resolution, Error> {
+        assert!(
+            module_specifier.starts_with('.'),
+            "We are not using node_modules within this example"
+        );
+
+        let base = match base {
+            FileName::Real(v) => v,
+            _ => unreachable!(),
+        };
+
+        Ok(Resolution {
+            filename: FileName::Real(
+                base.parent()
+                    .unwrap()
+                    .join(module_specifier)
+                    .with_extension("js"),
+            ),
+            slug: None,
+        })
+    }
+}
+
+struct Noop;
+
+impl Hook for Noop {
+    fn get_import_meta_props(&self, _: Span, _: &ModuleRecord) -> Result<Vec<KeyValueProp>, Error> {
+        let temp_value = KeyValueProp {
+            key: PropName::Str(("test".into())),
+            value: Box::new(swc_ecma_ast::Expr::Lit(swc_ecma_ast::Lit::Str(
+                swc_ecma_ast::Str {
+                    span: Default::default(),
+                    value: "test".into(),
+                    raw: None,
+                },
+            ))),
+        };
+        
+        Ok(vec![temp_value])
     }
 }
