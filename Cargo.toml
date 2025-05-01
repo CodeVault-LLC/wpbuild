@@ -7,3 +7,7 @@ edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/codevault-llc/wpbuild.git"
 
+[workspace.dependencies]
+
+par-core                  = { version = "1.0.3", default-features = false, features = ["rayon", "parallel"] }
+rayon = "1.10.0"

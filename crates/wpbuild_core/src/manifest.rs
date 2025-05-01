@@ -22,9 +22,10 @@ impl Manifest {
         self.files.insert(input_str, output_str);
     }
 
-    pub fn save_to(&self, output_dir: &str) {
+    pub fn save_to(&self, output_dir: &str) -> Result<(), String> {
         let manifest_path = PathBuf::from(output_dir).join("asset-manifest.json");
         let json = serde_json::to_string_pretty(&self).unwrap();
-        fs::write(manifest_path, json).unwrap();
+        fs::write(&manifest_path, json).map_err(|e| format!("Failed to write manifest: {}", e))?;
+        Ok(())
     }
 }
